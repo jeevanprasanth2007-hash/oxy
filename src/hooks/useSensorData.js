@@ -8,12 +8,12 @@ import { supabase } from "../lib/supabase";
 const DEVICE_ID =
   "93fb0b11-ea9a-4692-a186-1c388cdf3317";
 
-// ESP32 sends approximately every 2 seconds.
-// If no fresh reading arrives within 10 seconds,
-// consider the physical ESP32 device OFFLINE.
+// ESP32 existing code sends approximately every 2 seconds.
+// Consider the device offline if no fresh reading arrives
+// within 10 seconds.
 const OFFLINE_AFTER_MS = 10000;
 
-// Watchdog checks every second.
+// Re-check device freshness every second.
 const WATCHDOG_INTERVAL_MS = 1000;
 
 
@@ -27,23 +27,19 @@ export function useSensorData() {
 
   const [loading, setLoading] = useState(true);
 
-  // Supabase Realtime connection
   const [realtimeConnected, setRealtimeConnected] =
     useState(false);
 
-  // Physical ESP32 status
   const [deviceOnline, setDeviceOnline] =
     useState(false);
 
-  // Error state
   const [error, setError] = useState(null);
 
-  // Prevent state updates after unmount
   const mountedRef = useRef(true);
 
 
   // ===================================================
-  // CHECK IF COMPONENT IS STILL MOUNTED
+  // MOUNT / UNMOUNT
   // ===================================================
 
   useEffect(() => {
@@ -58,7 +54,7 @@ export function useSensorData() {
 
 
   // ===================================================
-  // FETCH LATEST SENSOR READING
+  // FETCH LATEST REAL HARDWARE READING
   // ===================================================
 
   const fetchLatest = useCallback(async () => {
@@ -67,7 +63,7 @@ export function useSensorData() {
 
       const {
         data,
-        error: fetchError,
+        error: fetchError
       } = await supabase
 
         .from("sensor_readings")
@@ -82,7 +78,7 @@ export function useSensorData() {
         .order(
           "created_at",
           {
-            ascending: false,
+            ascending: false
           }
         )
 
@@ -106,7 +102,7 @@ export function useSensorData() {
 
           setError(
             fetchError.message ||
-              "Unable to fetch sensor data."
+            "Unable to fetch sensor data."
           );
 
           setLoading(false);
@@ -142,27 +138,23 @@ export function useSensorData() {
 
         setError(
           err?.message ||
-            "Unexpected sensor error."
+          "Unexpected sensor error."
         );
 
         setLoading(false);
       }
-
     }
 
   }, []);
 
 
   // ===================================================
-  // CHECK PHYSICAL DEVICE STATUS
+  // CHECK DEVICE FRESHNESS
   // ===================================================
 
   const checkDeviceStatus = useCallback(() => {
 
-    // -----------------------------------------------
-    // No reading = OFFLINE
-    // -----------------------------------------------
-
+    // No reading
     if (!reading?.created_at) {
 
       setDeviceOnline(false);
@@ -171,20 +163,14 @@ export function useSensorData() {
     }
 
 
-    // -----------------------------------------------
-    // Convert database timestamp
-    // -----------------------------------------------
-
+    // Convert timestamp
     const lastSeen =
       new Date(
         reading.created_at
       ).getTime();
 
 
-    // -----------------------------------------------
-    // Invalid timestamp = OFFLINE
-    // -----------------------------------------------
-
+    // Invalid timestamp
     if (
       Number.isNaN(lastSeen)
     ) {
@@ -195,19 +181,13 @@ export function useSensorData() {
     }
 
 
-    // -----------------------------------------------
-    // Calculate reading age
-    // -----------------------------------------------
-
+    // Calculate age
     const age =
       Date.now() - lastSeen;
 
 
-    // -----------------------------------------------
-    // Device is online only when:
-    //
-    // 0 <= age <= 10 seconds
-    // -----------------------------------------------
+    // Hardware is online only when
+    // reading is fresh.
 
     const isOnline =
       age >= 0 &&
@@ -222,7 +202,7 @@ export function useSensorData() {
 
 
   // ===================================================
-  // INITIAL DATA LOAD
+  // INITIAL DATABASE LOAD
   // ===================================================
 
   useEffect(() => {
@@ -235,180 +215,226 @@ export function useSensorData() {
   // ===================================================
   // SUPABASE REALTIME
   // ===================================================
-// ===================================================
-// SUPABASE REALTIME
-// ===================================================
 
-useEffect(() => {
-  let channel = null;
-  let cancelled = false;
+  useEffect(() => {
 
-  const setupRealtime = async () => {
-    try {
-      // -------------------------------------------------
-      // IMPORTANT:
-      // Remove any old channel with the same topic.
-      // This prevents React StrictMode / remounts from
-      // reusing an already-subscribed channel.
-      // -------------------------------------------------
+    let channel = null;
 
-      const existingChannels = supabase.getChannels();
+    let cancelled = false;
 
-      const oldChannels = existingChannels.filter(
-        (existingChannel) =>
-          existingChannel.topic ===
-          `realtime:oxyguard-live-${DEVICE_ID}`
-      );
 
-      for (const oldChannel of oldChannels) {
+    const setupRealtime = async () => {
+
+      try {
+
+        // ------------------------------------------------
+        // CREATE UNIQUE CHANNEL
+        // ------------------------------------------------
+
+        const channelName =
+          `oxyguard-live-${DEVICE_ID}-${crypto.randomUUID()}`;
+
+
         console.log(
-          "Removing old OxyGuard channel:",
-          oldChannel.topic
+          "Creating OxyGuard Realtime channel:",
+          channelName
         );
 
-        await supabase.removeChannel(oldChannel);
-      }
 
-      if (cancelled) {
-        return;
-      }
+        // ------------------------------------------------
+        // SUBSCRIBE
+        // ------------------------------------------------
 
-      // -------------------------------------------------
-      // Create a UNIQUE channel name
-      // -------------------------------------------------
+        channel = supabase
 
-      const channelName =
-        `oxyguard-live-${DEVICE_ID}-${crypto.randomUUID()}`;
+          .channel(channelName)
 
-      console.log(
-        "Creating OxyGuard realtime channel:",
-        channelName
-      );
+          .on(
 
-      // -------------------------------------------------
-      // IMPORTANT:
-      // .on() MUST happen BEFORE .subscribe()
-      // -------------------------------------------------
+            "postgres_changes",
 
-      channel = supabase
-        .channel(channelName)
+            {
+              event: "INSERT",
 
-        .on(
-          "postgres_changes",
+              schema: "public",
 
-          {
-            event: "INSERT",
-            schema: "public",
-            table: "sensor_readings",
-            filter: `device_id=eq.${DEVICE_ID}`,
-          },
+              table: "sensor_readings",
 
-          (payload) => {
-            console.log(
-              "OXYGUARD LIVE READING:",
-              payload.new
-            );
+              filter:
+                `device_id=eq.${DEVICE_ID}`
+            },
 
-            if (!mountedRef.current) {
-              return;
+            (payload) => {
+
+              console.log(
+                "OXYGUARD LIVE HARDWARE READING:",
+                payload.new
+              );
+
+
+              if (
+                !mountedRef.current
+              ) {
+                return;
+              }
+
+
+              // Accept the real ESP32 reading
+              setReading(
+                payload.new
+              );
+
+              setError(null);
+
+              setLoading(false);
+
             }
 
-            setReading(payload.new);
-            setError(null);
-          }
-        )
+          )
 
-        .subscribe((status, realtimeError) => {
-          console.log(
-            "OxyGuard Realtime:",
-            status
+
+          .subscribe(
+
+            (status, realtimeError) => {
+
+              console.log(
+                "OxyGuard Realtime:",
+                status
+              );
+
+
+              if (realtimeError) {
+
+                console.error(
+                  "OxyGuard Realtime error:",
+                  realtimeError
+                );
+
+              }
+
+
+              if (
+                !mountedRef.current
+              ) {
+                return;
+              }
+
+
+              if (
+                status === "SUBSCRIBED"
+              ) {
+
+                console.log(
+                  "OxyGuard Realtime connected"
+                );
+
+                setRealtimeConnected(
+                  true
+                );
+
+              }
+
+
+              else if (
+
+                status ===
+                  "CHANNEL_ERROR" ||
+
+                status ===
+                  "TIMED_OUT" ||
+
+                status ===
+                  "CLOSED"
+
+              ) {
+
+                console.warn(
+                  "OxyGuard Realtime:",
+                  status
+                );
+
+                setRealtimeConnected(
+                  false
+                );
+
+              }
+
+            }
+
           );
 
-          if (realtimeError) {
-            console.error(
-              "OxyGuard Realtime error:",
-              realtimeError
-            );
-          }
-
-          if (!mountedRef.current) {
-            return;
-          }
-
-          if (status === "SUBSCRIBED") {
-            console.log(
-              "✅ OxyGuard Realtime connected"
-            );
-
-            setRealtimeConnected(true);
-          }
-
-          else if (
-            status === "CHANNEL_ERROR" ||
-            status === "TIMED_OUT" ||
-            status === "CLOSED"
-          ) {
-            console.warn(
-              "⚠️ OxyGuard Realtime:",
-              status
-            );
-
-            setRealtimeConnected(false);
-          }
-        });
-
-    } catch (err) {
-      console.error(
-        "OxyGuard Realtime setup error:",
-        err
-      );
-
-      if (mountedRef.current) {
-        setRealtimeConnected(false);
-
-        setError(
-          err?.message ||
-            "Realtime connection failed."
-        );
       }
-    }
-  };
 
-  setupRealtime();
+      catch (err) {
 
-  // =================================================
-  // CLEANUP
-  // =================================================
+        console.error(
+          "OxyGuard Realtime setup error:",
+          err
+        );
 
-  return () => {
-    cancelled = true;
 
-    if (channel) {
-      console.log(
-        "Cleaning up OxyGuard Realtime channel"
-      );
+        if (
+          mountedRef.current
+        ) {
 
-      supabase
-        .removeChannel(channel)
-        .then(() => {
-          console.log(
-            "OxyGuard Realtime channel removed"
+          setRealtimeConnected(
+            false
           );
-        })
-        .catch((err) => {
-          console.error(
-            "OxyGuard channel cleanup error:",
-            err
+
+          setError(
+            err?.message ||
+            "Realtime connection failed."
           );
-        });
-    }
 
-    if (mountedRef.current) {
-      setRealtimeConnected(false);
-    }
-  };
+        }
 
-}, []);
+      }
+
+    };
+
+
+    setupRealtime();
+
+
+    // =================================================
+    // CLEANUP
+    // =================================================
+
+    return () => {
+
+      cancelled = true;
+
+
+      if (channel) {
+
+        supabase
+          .removeChannel(channel)
+
+          .catch((err) => {
+
+            console.error(
+              "OxyGuard channel cleanup error:",
+              err
+            );
+
+          });
+
+      }
+
+
+      if (
+        mountedRef.current
+      ) {
+
+        setRealtimeConnected(
+          false
+        );
+
+      }
+
+    };
+
+  }, []);
 
 
   // ===================================================
@@ -424,16 +450,18 @@ useEffect(() => {
     // Check every second
     const timer =
       setInterval(
+
         () => {
 
           checkDeviceStatus();
 
         },
+
         WATCHDOG_INTERVAL_MS
+
       );
 
 
-    // Cleanup timer
     return () => {
 
       clearInterval(
@@ -443,36 +471,39 @@ useEffect(() => {
     };
 
   }, [
-    checkDeviceStatus,
+    checkDeviceStatus
   ]);
 
 
   // ===================================================
-  // RETURN DATA
+  // RETURN
   // ===================================================
 
   return {
 
-    // Latest sensor reading
+    // Latest REAL ESP32 reading
     reading,
 
-    // Initial loading state
+    // Loading state
     loading,
 
-    // Supabase Realtime status
+    // Supabase Realtime
     realtimeConnected,
 
-    // Actual physical-device freshness status
+    // Physical ESP32 status
     deviceOnline,
 
-    // Supabase device UUID
-    deviceId: DEVICE_ID,
+    // Device UUID
+    deviceId:
+      DEVICE_ID,
 
-    // Error message
+    // Error
     error,
 
-    // Useful configuration value
+    // Offline threshold
     offlineAfterMs:
-      OFFLINE_AFTER_MS,
+      OFFLINE_AFTER_MS
+
   };
+
 }
